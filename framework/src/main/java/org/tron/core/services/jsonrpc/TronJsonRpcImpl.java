@@ -35,11 +35,11 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
-import org.bouncycastle.util.encoders.Hex;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.tron.api.GrpcAPI.BytesMessage;
@@ -50,14 +50,12 @@ import org.tron.api.GrpcAPI.TransactionExtention;
 import org.tron.api.GrpcAPI.TransactionInfoList;
 import org.tron.common.crypto.Hash;
 import org.tron.common.es.ExecutorServiceManager;
-import org.tron.common.logsfilter.ContractEventParser;
 import org.tron.common.logsfilter.capsule.BlockFilterCapsule;
 import org.tron.common.logsfilter.capsule.LogsFilterCapsule;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.runtime.vm.DataWord;
 import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.ByteUtil;
-import org.tron.common.utils.DecodeUtil;
 import org.tron.core.Wallet;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.TransactionCapsule;
@@ -99,7 +97,6 @@ import org.tron.core.services.jsonrpc.types.TransactionReceipt.TransactionContex
 import org.tron.core.services.jsonrpc.types.TransactionResult;
 import org.tron.core.store.StorageRowStore;
 import org.tron.core.vm.program.Storage;
-import org.tron.core.vm.program.listener.BufferingSimulationTracer;
 import org.tron.json.JSON;
 import org.tron.program.Version;
 import org.tron.protos.Protocol.Account;
@@ -179,9 +176,6 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
   private static final String NO_BLOCK_HEADER = "header not found";
   private static final String NO_BLOCK_HEADER_BY_HASH = "header for hash not found";
 
-  private static final String ERROR_SELECTOR = "08c379a0"; // Function selector for Error(string)
-  private static final int REVERT_REASON_SELECTOR_LENGTH = 4;
-  private static final int MAX_REVERT_REASON_PAYLOAD_BYTES = 4096;
   private int filterParallelThreshold = 10000;
   /**
    * Using the default maxLogFilterNum of 20,000, a 3-thread pool can keep up with log event
@@ -534,32 +528,6 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
    * Decodes an Error(string) revert reason when possible.
    * Returns ": reason" for a non-empty reason, otherwise "".
    */
-  static String tryDecodeRevertReason(byte[] resData) {
-    if (resData == null || resData.length <= REVERT_REASON_SELECTOR_LENGTH) {
-      return "";
-    }
-    if (!Hex.toHexString(resData, 0, REVERT_REASON_SELECTOR_LENGTH).equals(ERROR_SELECTOR)) {
-      return "";
-    }
-
-    int revertPayloadLength = resData.length - REVERT_REASON_SELECTOR_LENGTH;
-    if (revertPayloadLength > MAX_REVERT_REASON_PAYLOAD_BYTES) {
-      logger.debug("skip parsing oversized revert reason payload: {} bytes", revertPayloadLength);
-      return "";
-    }
-
-    try {
-      String reason = ContractEventParser.parseDataBytes(
-          Arrays.copyOfRange(resData, REVERT_REASON_SELECTOR_LENGTH,
-              resData.length),
-          "string", 0);
-      return reason.isEmpty() ? "" : ": " + reason;
-    } catch (RuntimeException e) {
-      logger.debug("parse revert reason failed", e);
-      return "";
-    }
-  }
-
   /**
    * @param data Hash of the method signature and encoded parameters. for example:
    * getMethodSign(methodName(uint256,uint256)) || data1 || data2
@@ -604,7 +572,8 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
       result = ByteArray.toJsonHex(listBytes);
     } else {
       byte[] resData = trxExtBuilder.getConstantResult(0).toByteArray();
-      String errMsg = retBuilder.getMessage().toStringUtf8() + tryDecodeRevertReason(resData);
+      String errMsg = retBuilder.getMessage().toStringUtf8()
+          + SimulationResultEncoder.tryDecodeRevertReason(resData);
 
       if (resData.length > 0) {
         throw new JsonRpcInternalException(errMsg, ByteArray.toJsonHex(resData));
@@ -738,7 +707,8 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
 
     if (trxExtBuilder.getTransaction().getRet(0).getRet().equals(code.FAILED)) {
       byte[] data = trxExtBuilder.getConstantResult(0).toByteArray();
-      String errMsg = retBuilder.getMessage().toStringUtf8() + tryDecodeRevertReason(data);
+      String errMsg = retBuilder.getMessage().toStringUtf8()
+          + SimulationResultEncoder.tryDecodeRevertReason(data);
 
       if (data.length > 0) {
         throw new JsonRpcInternalException(errMsg, ByteArray.toJsonHex(data));
@@ -1061,28 +1031,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
   }
 
   private static final int MAX_SIMULATE_CALLS_PER_BLOCK = 32;
-  private static final String SIMULATE_BLOCK_HASH_PREFIX = "sim:";
   private static final long BLOCK_INTERVAL_MS = 3000L;
-  private static final String TRANSFER_TOPIC_HEX =
-      "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-  /**
-   * keccak256("TRC10Transfer(address,address,uint256,uint256)") — synthetic
-   * topic[0] for TRC-10 transfer logs, distinguishing them from ERC-20
-   * Transfer (same synthetic-log address, different signature).
-   *
-   * <p><b>Tron private extension; stable client contract.</b> This is not part of any
-   * cross-chain Ethereum standard. Wallets and indexers will hard-code this hex value to
-   * recognise simulated TRC-10 transfers, so the signature string must not be edited once
-   * shipped. {@code TronJsonRpcImplTest#trc10TransferTopicHex_isStable} pins the canonical
-   * signature with its own copy of the literal; editing the literal here without updating the
-   * test fails CI.
-   */
-  static final String TRC10_TRANSFER_TOPIC_HEX =
-      ByteArray.toHexString(Hash.sha3(
-          "TRC10Transfer(address,address,uint256,uint256)"
-              .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
-  private static final String ERC7528_NATIVE_ADDRESS =
-      "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
   @Override
   public List<SimulateBlockResult> ethSimulateV1(SimulateV1Args args, Object blockParamObj)
@@ -1175,9 +1124,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
     SimulateBlockResult br = new SimulateBlockResult();
     long headNum = head.getNum();
     byte[] headHash = head.getBlockId().getBytes();
-    byte[] simBlockHash = Hash.sha3(
-        (SIMULATE_BLOCK_HASH_PREFIX + ByteArray.toHexString(headHash) + ":1")
-            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    byte[] simBlockHash = SimulationResultEncoder.syntheticBlockHash(headHash);
     String simBlockHashRaw = ByteArray.toHexString(simBlockHash);
     String simBlockHashHex = ByteArray.toJsonHex(simBlockHash);
 
@@ -1192,63 +1139,22 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
     br.setTimestamp(ByteArray.toJsonHex((head.getTimeStamp() + BLOCK_INTERVAL_MS) / 1000));
 
     long totalGasUsed = 0L;
-    int logIndex = 0;
+    AtomicInteger logIdx = new AtomicInteger(0);
     List<SimulateCallResult> callResults = new ArrayList<>(outcome.getCalls().size());
     Object[] transactions = new Object[outcome.getCalls().size()];
     for (int i = 0; i < outcome.getCalls().size(); i++) {
       SimulateCallOutcome callOutcome = outcome.getCalls().get(i);
-      org.tron.common.runtime.ProgramResult pr = callOutcome.getResult();
       CallArguments call = calls.get(i);
 
-      byte[] txHashBytes = Hash.sha3(
-          (SIMULATE_BLOCK_HASH_PREFIX + ByteArray.toHexString(headHash) + ":" + i)
-              .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-      String txHashRaw = ByteArray.toHexString(txHashBytes);
-      String txHashHex = ByteArray.toJsonHex(txHashBytes);
-
-      SimulateCallResult scr = new SimulateCallResult();
-      scr.setReturnData(ByteArray.toJsonHex(pr.getHReturn()));
-      scr.setGasUsed(ByteArray.toJsonHex(pr.getEnergyUsed()));
-      scr.setTransactionHash(txHashHex);
-      scr.setTransactionIndex(ByteArray.toJsonHex(i));
-      totalGasUsed += pr.getEnergyUsed();
-
-      boolean reverted = pr.isRevert();
-      boolean failed = pr.getException() != null || reverted;
-      scr.setStatus(failed ? "0x0" : "0x1");
-
-      List<TronJsonRpc.LogFilterElement> logs = new ArrayList<>();
-      if (!failed) {
-        byte[] contractAddr = pr.getContractAddress();
-        if (contractAddr != null && contractAddr.length > 0) {
-          scr.setContractAddress(ByteArray.toJsonHexAddress(contractAddr));
-        }
-        for (BufferingSimulationTracer.Entry entry : callOutcome.getTracerEntries()) {
-          TronJsonRpc.LogFilterElement el = entryToLogFilterElement(entry, simBlockHashRaw,
-              headNum + 1, txHashRaw, i, logIndex++, traceTransfers);
-          if (el != null) {
-            logs.add(el);
-          }
-        }
-      }
-      scr.setLogs(logs);
-
-      if (failed) {
-        byte[] revertData = pr.getHReturn();
-        if (revertData != null && revertData.length > 0) {
-          scr.setErrorData(ByteArray.toJsonHex(revertData));
-        }
-        if (reverted) {
-          scr.setErrorMessage("REVERT opcode executed" + tryDecodeRevertReason(revertData));
-        } else if (pr.getException() != null) {
-          scr.setErrorMessage(pr.getException().getMessage());
-        }
-      }
-
+      SimulateCallResult scr = SimulationResultEncoder.buildCallResult(
+          callOutcome, headHash, simBlockHashRaw, headNum + 1, i, logIdx, traceTransfers);
+      totalGasUsed += callOutcome.getResult().getEnergyUsed();
       callResults.add(scr);
+
       transactions[i] = returnFullTransactions
-          ? buildFullTransaction(call, txHashHex, simBlockHashHex, headNum + 1, i)
-          : txHashHex;
+          ? buildFullTransaction(call, scr.getTransactionHash(),
+              simBlockHashHex, headNum + 1, i)
+          : scr.getTransactionHash();
     }
     br.setGasUsed(ByteArray.toJsonHex(totalGasUsed));
     br.setCalls(callResults);
@@ -1270,55 +1176,6 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
     String inputHex = data == null ? "0x" : (data.startsWith("0x") ? data : "0x" + data);
     return new TransactionResult(txHashHex, blockHashHex, blockNumber, txIndex,
         fromHex, toHex, gas, value, inputHex);
-  }
-
-  private TronJsonRpc.LogFilterElement entryToLogFilterElement(
-      BufferingSimulationTracer.Entry entry, String blockHashRaw, long blockNum,
-      String txHashRaw, int callIndex, int logIdx, boolean traceTransfers) {
-
-    String addressRaw;
-    List<DataWord> topics;
-    String dataHex;
-
-    if (entry.getKind() == BufferingSimulationTracer.EntryKind.TRANSFER) {
-      if (!traceTransfers) {
-        return null;
-      }
-      addressRaw = ERC7528_NATIVE_ADDRESS;
-      topics = new ArrayList<>(3);
-      topics.add(new DataWord(ByteArray.fromHexString(TRANSFER_TOPIC_HEX)));
-      topics.add(new DataWord(entry.getFromEvm()));
-      topics.add(new DataWord(entry.getToEvm()));
-      dataHex = ByteArray.toHexString(new DataWord(entry.getAmount()).getData());
-    } else if (entry.getKind() == BufferingSimulationTracer.EntryKind.TOKEN_TRANSFER) {
-      if (!traceTransfers) {
-        return null;
-      }
-      addressRaw = ERC7528_NATIVE_ADDRESS;
-      topics = new ArrayList<>(4);
-      topics.add(new DataWord(ByteArray.fromHexString(TRC10_TRANSFER_TOPIC_HEX)));
-      topics.add(new DataWord(entry.getFromEvm()));
-      topics.add(new DataWord(entry.getToEvm()));
-      topics.add(new DataWord(entry.getTokenId()));
-      dataHex = ByteArray.toHexString(new DataWord(entry.getAmount()).getData());
-    } else {
-      org.tron.common.runtime.vm.LogInfo li = entry.getLogInfo();
-      byte[] addr = li.getAddress();
-      if (addr != null && addr.length > 0 && addr[0] == DecodeUtil.addressPreFixByte) {
-        byte[] stripped = new byte[addr.length - 1];
-        System.arraycopy(addr, 1, stripped, 0, stripped.length);
-        addressRaw = ByteArray.toHexString(stripped);
-      } else {
-        addressRaw = addr == null ? "" : ByteArray.toHexString(addr);
-      }
-      topics = new ArrayList<>(li.getTopics());
-      dataHex = li.getData() == null ? "" : ByteArray.toHexString(li.getData());
-    }
-
-    return new TronJsonRpc.LogFilterElement(
-        blockHashRaw, blockNum, txHashRaw, callIndex,
-        addressRaw, topics, dataHex, logIdx, false,
-        System.currentTimeMillis());
   }
 
   @Override

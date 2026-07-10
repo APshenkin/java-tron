@@ -108,6 +108,8 @@ public class FullNodeHttpApiService extends HttpService {
   @Autowired
   private TriggerConstantContractServlet triggerConstantContractServlet;
   @Autowired
+  private SimulateTriggerSmartContractServlet simulateTriggerSmartContractServlet;
+  @Autowired
   private EstimateEnergyServlet estimateEnergyServlet;
   @Autowired
   private GetContractServlet getContractServlet;
@@ -367,6 +369,8 @@ public class FullNodeHttpApiService extends HttpService {
         "/wallet/triggersmartcontract");
     context.addServlet(new ServletHolder(triggerConstantContractServlet),
         "/wallet/triggerconstantcontract");
+    context.addServlet(new ServletHolder(simulateTriggerSmartContractServlet),
+        "/wallet/simulatetriggersmartcontract");
     context.addServlet(new ServletHolder(estimateEnergyServlet), "/wallet/estimateenergy");
     context.addServlet(new ServletHolder(getContractServlet), "/wallet/getcontract");
     context.addServlet(new ServletHolder(getContractInfoServlet), "/wallet/getcontractinfo");

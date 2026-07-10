@@ -15,7 +15,7 @@ public class TronJsonRpcRevertReasonTest {
         + "0000000000000000000000000000000000000000000000000000000000000020"
         + "000000000000000000000000000000000000000000000000000000007fffffff"
         + "414243");
-    Assert.assertEquals("", TronJsonRpcImpl.tryDecodeRevertReason(resData));
+    Assert.assertEquals("", SimulationResultEncoder.tryDecodeRevertReason(resData));
   }
 
   @Test
@@ -24,7 +24,7 @@ public class TronJsonRpcRevertReasonTest {
         + "0000000000000000000000000000000000000000000000000000000000000020"
         + "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
         + "414243");
-    Assert.assertEquals("", TronJsonRpcImpl.tryDecodeRevertReason(resData));
+    Assert.assertEquals("", SimulationResultEncoder.tryDecodeRevertReason(resData));
   }
 
   @Test
@@ -34,7 +34,7 @@ public class TronJsonRpcRevertReasonTest {
         + "0000000000000000000000000000000000000000000000000000000000000016"
         + "6e6f7420656e6f75676820696e7075742076616c756500000000000000000000");
     Assert.assertEquals(": not enough input value",
-        TronJsonRpcImpl.tryDecodeRevertReason(resData));
+        SimulationResultEncoder.tryDecodeRevertReason(resData));
   }
 
   @Test
@@ -43,7 +43,7 @@ public class TronJsonRpcRevertReasonTest {
     byte[] resData = ByteArray.fromHexString("08c379a0"
         + "0000000000000000000000000000000000000000000000000000000000000020"
         + "0000000000000000000000000000000000000000000000000000000000000000");
-    Assert.assertEquals("", TronJsonRpcImpl.tryDecodeRevertReason(resData));
+    Assert.assertEquals("", SimulationResultEncoder.tryDecodeRevertReason(resData));
   }
 
   @Test
@@ -54,18 +54,18 @@ public class TronJsonRpcRevertReasonTest {
     resData[1] = (byte) 0xc3;
     resData[2] = 0x79;
     resData[3] = (byte) 0xa0;
-    Assert.assertEquals("", TronJsonRpcImpl.tryDecodeRevertReason(resData));
+    Assert.assertEquals("", SimulationResultEncoder.tryDecodeRevertReason(resData));
   }
 
   @Test
   public void testTryDecodeRevertReasonWithNullData() {
-    Assert.assertEquals("", TronJsonRpcImpl.tryDecodeRevertReason(null));
+    Assert.assertEquals("", SimulationResultEncoder.tryDecodeRevertReason(null));
   }
 
   @Test
   public void testTryDecodeRevertReasonWithShortSelector() {
     // length == selector length (4): not enough bytes for any payload, reject.
-    Assert.assertEquals("", TronJsonRpcImpl.tryDecodeRevertReason(new byte[]{
+    Assert.assertEquals("", SimulationResultEncoder.tryDecodeRevertReason(new byte[]{
         0x08, (byte) 0xc3, 0x79, (byte) 0xa0}));
   }
 
@@ -74,7 +74,7 @@ public class TronJsonRpcRevertReasonTest {
     // Non-Error(string) selector (e.g. Panic(uint256) = 0x4e487b71) must be rejected.
     byte[] resData = ByteArray.fromHexString("4e487b71"
         + "0000000000000000000000000000000000000000000000000000000000000001");
-    Assert.assertEquals("", TronJsonRpcImpl.tryDecodeRevertReason(resData));
+    Assert.assertEquals("", SimulationResultEncoder.tryDecodeRevertReason(resData));
   }
 
   @Test
@@ -92,6 +92,6 @@ public class TronJsonRpcRevertReasonTest {
     // data "ok", remaining bytes stay zero-padded
     resData[4 + 64] = 'o';
     resData[4 + 65] = 'k';
-    Assert.assertEquals(": ok", TronJsonRpcImpl.tryDecodeRevertReason(resData));
+    Assert.assertEquals(": ok", SimulationResultEncoder.tryDecodeRevertReason(resData));
   }
 }
