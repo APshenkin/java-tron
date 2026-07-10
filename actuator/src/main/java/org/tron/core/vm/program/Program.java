@@ -147,6 +147,17 @@ public class Program {
   @Getter
   @Setter
   private long callPenaltyEnergy;
+  /**
+   * Observer wired in by simulate-only callers (eth_simulateV1, triggerConstantContract with
+   * trace) to capture transfer / token-transfer / LOG events alongside the normal VM run.
+   *
+   * <p><b>Consensus invariant:</b> this field MUST be {@code null} on every consensus execution
+   * path. The tracer mutates no chain state, but a non-null reference means {@code transfer-} and
+   * {@code transferAllToken-WithTrace} take the trace branch and skip the byte-identical
+   * {@link MUtil#transferAllToken} fast path — divergence here would surface as a sync-from-genesis
+   * mismatch. Only {@code Wallet#simulateConstantContracts} and {@code Wallet#triggerConstantContract}
+   * should set this; gated on {@link org.tron.core.config.args.Args#isSupportConstant()}.
+   */
   @Getter
   @Setter
   private SimulationTracer simulationTracer;
@@ -488,7 +499,7 @@ public class Program {
       try {
         MUtil.transfer(getContractState(), owner, obtainer, balance);
         if (simulationTracer != null && balance > 0) {
-          simulationTracer.onTransfer(stripTronPrefix(owner), stripTronPrefix(obtainer), balance);
+          simulationTracer.onTransfer(MUtil.stripTronPrefix(owner), MUtil.stripTronPrefix(obtainer), balance);
         }
         if (VMConfig.allowTvmTransferTrc10()) {
           transferAllTokenWithTrace(owner, obtainer);
@@ -522,15 +533,6 @@ public class Program {
     getResult().addDeleteAccount(this.getContractAddress());
   }
 
-  private static byte[] stripTronPrefix(byte[] tronAddress) {
-    if (tronAddress == null || tronAddress.length != 21) {
-      return tronAddress;
-    }
-    byte[] evm = new byte[20];
-    System.arraycopy(tronAddress, 1, evm, 0, 20);
-    return evm;
-  }
-
   /**
    * Snapshot the owner's TRC-10 asset map, perform the sweep, then emit one
    * {@code onTokenTransfer} per non-zero entry — used for SELFDESTRUCT.
@@ -539,6 +541,10 @@ public class Program {
    * "log after real state change succeeds" invariant the other hooks follow.
    */
   private void transferAllTokenWithTrace(byte[] owner, byte[] dest) {
+    // Consensus invariant: when simulationTracer == null, this method must be byte-identical to
+    // MUtil.transferAllToken — no logging, no Args reads, no extra getAccount call, nothing that
+    // could perturb the post-state hash. Anything new belongs in the simulationTracer != null
+    // branch only. Hoisting a statement above this guard breaks sync-from-genesis.
     if (simulationTracer == null) {
       MUtil.transferAllToken(getContractState(), owner, dest);
       return;
@@ -546,8 +552,8 @@ public class Program {
     java.util.Map<String, Long> snapshot =
         new java.util.HashMap<>(getContractState().getAccount(owner).getAssetMapV2());
     MUtil.transferAllToken(getContractState(), owner, dest);
-    byte[] fromEvm = stripTronPrefix(owner);
-    byte[] toEvm = stripTronPrefix(dest);
+    byte[] fromEvm = MUtil.stripTronPrefix(owner);
+    byte[] toEvm = MUtil.stripTronPrefix(dest);
     for (java.util.Map.Entry<String, Long> e : snapshot.entrySet()) {
       if (e.getValue() != null && e.getValue() > 0) {
         simulationTracer.onTokenTransfer(fromEvm, toEvm,
@@ -597,7 +603,7 @@ public class Program {
     try {
       MUtil.transfer(getContractState(), owner, obtainer, balance);
       if (simulationTracer != null && balance > 0) {
-        simulationTracer.onTransfer(stripTronPrefix(owner), stripTronPrefix(obtainer), balance);
+        simulationTracer.onTransfer(MUtil.stripTronPrefix(owner), MUtil.stripTronPrefix(obtainer), balance);
       }
       if (VMConfig.allowTvmTransferTrc10()) {
         transferAllTokenWithTrace(owner, obtainer);
@@ -932,8 +938,8 @@ public class Program {
       deposit.addBalance(senderAddress, -endowment);
       newBalance = deposit.addBalance(newAddress, endowment);
       if (simulationTracer != null) {
-        simulationTracer.onTransfer(stripTronPrefix(senderAddress),
-            stripTronPrefix(newAddress), endowment);
+        simulationTracer.onTransfer(MUtil.stripTronPrefix(senderAddress),
+            MUtil.stripTronPrefix(newAddress), endowment);
       }
     }
 
@@ -1168,8 +1174,8 @@ public class Program {
         if (simulationTracer != null
             && msg.getOpCode() != Op.DELEGATECALL
             && msg.getOpCode() != Op.CALLCODE) {
-          simulationTracer.onTransfer(stripTronPrefix(senderAddress),
-              stripTronPrefix(contextAddress), endowment);
+          simulationTracer.onTransfer(MUtil.stripTronPrefix(senderAddress),
+              MUtil.stripTronPrefix(contextAddress), endowment);
         }
       } else {
         try {
@@ -1187,8 +1193,8 @@ public class Program {
         if (simulationTracer != null
             && msg.getOpCode() != Op.DELEGATECALL
             && msg.getOpCode() != Op.CALLCODE) {
-          simulationTracer.onTokenTransfer(stripTronPrefix(senderAddress),
-              stripTronPrefix(contextAddress),
+          simulationTracer.onTokenTransfer(MUtil.stripTronPrefix(senderAddress),
+              MUtil.stripTronPrefix(contextAddress),
               Long.parseLong(new String(tokenId)), endowment);
         }
       }
@@ -1802,8 +1808,8 @@ public class Program {
           if (simulationTracer != null
               && msg.getOpCode() != Op.DELEGATECALL
               && msg.getOpCode() != Op.CALLCODE) {
-            simulationTracer.onTransfer(stripTronPrefix(senderAddress),
-                stripTronPrefix(contextAddress),
+            simulationTracer.onTransfer(MUtil.stripTronPrefix(senderAddress),
+                MUtil.stripTronPrefix(contextAddress),
                 msg.getEndowment().value().longValueExact());
           }
         } catch (ContractValidateException e) {
@@ -1821,8 +1827,8 @@ public class Program {
         if (simulationTracer != null
             && msg.getOpCode() != Op.DELEGATECALL
             && msg.getOpCode() != Op.CALLCODE) {
-          simulationTracer.onTokenTransfer(stripTronPrefix(senderAddress),
-              stripTronPrefix(contextAddress),
+          simulationTracer.onTokenTransfer(MUtil.stripTronPrefix(senderAddress),
+              MUtil.stripTronPrefix(contextAddress),
               Long.parseLong(new String(tokenId)), endowment);
         }
       }

@@ -189,6 +189,8 @@ import org.tron.core.exception.ZksnarkException;
 import org.tron.core.net.TronNetDelegate;
 import org.tron.core.net.TronNetService;
 import org.tron.core.net.message.adv.TransactionMessage;
+import org.tron.core.services.jsonrpc.types.SimulateCallOutcome;
+import org.tron.core.services.jsonrpc.types.SimulateOutcome;
 import org.tron.core.store.AccountIdIndexStore;
 import org.tron.core.store.AccountStore;
 import org.tron.core.store.AccountTraceStore;
@@ -3086,16 +3088,10 @@ public class Wallet {
       throws ContractValidateException, ContractExeException, HeaderNotFound, VMIllegalException {
 
     if (triggerSmartContract.getContractAddress().isEmpty()) { // deploy contract
-      CreateSmartContract.Builder deployBuilder = CreateSmartContract.newBuilder();
-      deployBuilder.setOwnerAddress(triggerSmartContract.getOwnerAddress());
-      deployBuilder.setNewContract(SmartContract.newBuilder()
-          .setOriginAddress(triggerSmartContract.getOwnerAddress())
-          .setBytecode(triggerSmartContract.getData())
-          .setCallValue(triggerSmartContract.getCallValue())
-          .setConsumeUserResourcePercent(100)
-          .setOriginEnergyLimit(1)
-          .build()
-      );
+      CreateSmartContract.Builder deployBuilder = buildEvmCreateSmartContract(
+          triggerSmartContract.getOwnerAddress().toByteArray(),
+          triggerSmartContract.getData().toByteArray(),
+          triggerSmartContract.getCallValue());
       deployBuilder.setCallTokenValue(triggerSmartContract.getCallTokenValue());
       deployBuilder.setTokenId(triggerSmartContract.getTokenId());
       long feeLimit = trxCap.getFeeLimit();
@@ -3180,44 +3176,6 @@ public class Wallet {
     return context;
   }
 
-  public static final class SimulateCallOutcome {
-
-    private final ProgramResult result;
-    private final List<BufferingSimulationTracer.Entry> tracerEntries;
-
-    SimulateCallOutcome(ProgramResult result, List<BufferingSimulationTracer.Entry> tracerEntries) {
-      this.result = result;
-      this.tracerEntries = tracerEntries;
-    }
-
-    public ProgramResult getResult() {
-      return result;
-    }
-
-    public List<BufferingSimulationTracer.Entry> getTracerEntries() {
-      return tracerEntries;
-    }
-  }
-
-  public static final class SimulateOutcome {
-
-    private final BlockCapsule headBlockCapsule;
-    private final List<SimulateCallOutcome> calls;
-
-    SimulateOutcome(BlockCapsule headBlockCapsule, List<SimulateCallOutcome> calls) {
-      this.headBlockCapsule = headBlockCapsule;
-      this.calls = calls;
-    }
-
-    public BlockCapsule getHeadBlockCapsule() {
-      return headBlockCapsule;
-    }
-
-    public List<SimulateCallOutcome> getCalls() {
-      return calls;
-    }
-  }
-
   public SimulateOutcome simulateConstantContracts(List<TransactionCapsule> trxCaps,
       boolean traceTransfers, boolean validation)
       throws ContractValidateException, ContractExeException, HeaderNotFound, VMIllegalException {
@@ -3253,7 +3211,13 @@ public class Wallet {
         ctx = executeOneConstantInternal(trxCap, headBlockCapsule, perCallChild, tracer);
       } catch (RuntimeException e) {
         logger.warn("Simulate call {} failed for reason: {}", i, e.getMessage());
-        throw e;
+        if (tracer != null) {
+          tracer.dropCall();
+        }
+        ProgramResult synthetic = new ProgramResult();
+        synthetic.setException(e);
+        outcomes.add(new SimulateCallOutcome(synthetic, java.util.Collections.emptyList()));
+        continue;
       }
       ProgramResult result = ctx.getProgramResult();
 
@@ -3271,6 +3235,26 @@ public class Wallet {
       outcomes.add(new SimulateCallOutcome(result, entries));
     }
     return new SimulateOutcome(headBlockCapsule, outcomes);
+  }
+
+  /**
+   * Build a CREATE-contract proto with Tron's EVM CREATE convention applied:
+   * {@code consumeUserResourcePercent=100} and {@code originEnergyLimit=1} — the same values
+   * the VM enforces for EVM-originated deploys (see {@code Program#createContractImpl}).
+   * Returns the builder so callers can attach call-token fields if needed.
+   */
+  public static CreateSmartContract.Builder buildEvmCreateSmartContract(byte[] ownerAddress,
+      byte[] code, long callValue) {
+    SmartContract newContract = SmartContract.newBuilder()
+        .setOriginAddress(ByteString.copyFrom(ownerAddress))
+        .setBytecode(ByteString.copyFrom(code))
+        .setCallValue(callValue)
+        .setConsumeUserResourcePercent(100)
+        .setOriginEnergyLimit(1)
+        .build();
+    return CreateSmartContract.newBuilder()
+        .setOwnerAddress(ByteString.copyFrom(ownerAddress))
+        .setNewContract(newContract);
   }
 
   private static String validateSenderForSimulate(TransactionCapsule trxCap,

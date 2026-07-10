@@ -15,14 +15,14 @@ import org.tron.common.runtime.vm.DataWord;
 import org.tron.common.runtime.vm.LogInfo;
 import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.DecodeUtil;
-import org.tron.core.Wallet;
 import org.tron.core.db.TransactionTrace;
+import org.tron.core.services.jsonrpc.types.SimulateCallOutcome;
 import org.tron.core.services.jsonrpc.types.SimulateCallResult;
 import org.tron.core.vm.program.listener.BufferingSimulationTracer;
 import org.tron.protos.Protocol.TransactionInfo;
 
 /**
- * Shared encoder that turns a {@link Wallet.SimulateCallOutcome} into a
+ * Shared encoder that turns a {@link SimulateCallOutcome} into a
  * {@link SimulateCallResult}, including the synthetic ERC-7528 Transfer
  * and TRC10Transfer logs produced by
  * {@link BufferingSimulationTracer}.
@@ -44,6 +44,13 @@ public final class SimulationResultEncoder {
    * keccak256("TRC10Transfer(address,address,uint256,uint256)") — synthetic
    * topic[0] for TRC-10 transfer logs, distinguishing them from ERC-20
    * Transfer (same synthetic-log address, different signature).
+   *
+   * <p><b>Tron private extension; stable client contract.</b> This is not part of any
+   * cross-chain Ethereum standard. Wallets and indexers will hard-code this hex value to
+   * recognise simulated TRC-10 transfers, so the signature string must not be edited once
+   * shipped. {@code SimulationResultEncoderTest#trc10TransferTopicHex_isStable} pins the
+   * canonical signature with its own copy of the literal; editing the literal here without
+   * updating the test fails CI.
    */
   public static final String TRC10_TRANSFER_TOPIC_HEX =
       ByteArray.toHexString(Hash.sha3(
@@ -63,24 +70,25 @@ public final class SimulationResultEncoder {
   /** Deterministic synthetic block hash for the simulated block above the head. */
   public static byte[] syntheticBlockHash(byte[] headHash) {
     return Hash.sha3(
-        (SIMULATE_BLOCK_HASH_PREFIX + ByteArray.toHexString(headHash) + ":1").getBytes());
+        (SIMULATE_BLOCK_HASH_PREFIX + ByteArray.toHexString(headHash) + ":1")
+            .getBytes(StandardCharsets.UTF_8));
   }
 
   /** Deterministic synthetic per-call tx hash within the simulated block. */
   public static byte[] syntheticTxHash(byte[] headHash, int callIndex) {
     return Hash.sha3(
         (SIMULATE_BLOCK_HASH_PREFIX + ByteArray.toHexString(headHash) + ":"
-            + callIndex).getBytes());
+            + callIndex).getBytes(StandardCharsets.UTF_8));
   }
 
   /**
-   * Encode a single {@link Wallet.SimulateCallOutcome} into a
+   * Encode a single {@link SimulateCallOutcome} into a
    * {@link SimulateCallResult}. The {@code logIdx} counter is mutated
    * across entries (including dropped ones — gaps in {@code logIndex} on
    * revert match geth's {@code logtracer.go:128} semantics).
    */
   public static SimulateCallResult buildCallResult(
-      Wallet.SimulateCallOutcome callOutcome,
+      SimulateCallOutcome callOutcome,
       byte[] headHash,
       String simBlockHashRaw,
       long blockNumber,
@@ -148,9 +156,9 @@ public final class SimulationResultEncoder {
       addressRaw = ERC7528_NATIVE_ADDRESS;
       topics = new ArrayList<>(3);
       topics.add(new DataWord(ByteArray.fromHexString(TRANSFER_TOPIC_HEX)));
-      topics.add(new DataWord(leftPad32(entry.getFromEvm())));
-      topics.add(new DataWord(leftPad32(entry.getToEvm())));
-      dataHex = ByteArray.toHexString(leftPad32(longToBytes(entry.getAmount())));
+      topics.add(new DataWord(entry.getFromEvm()));
+      topics.add(new DataWord(entry.getToEvm()));
+      dataHex = ByteArray.toHexString(new DataWord(entry.getAmount()).getData());
     } else if (entry.getKind() == BufferingSimulationTracer.EntryKind.TOKEN_TRANSFER) {
       if (!traceTransfers) {
         return null;
@@ -158,10 +166,10 @@ public final class SimulationResultEncoder {
       addressRaw = ERC7528_NATIVE_ADDRESS;
       topics = new ArrayList<>(4);
       topics.add(new DataWord(ByteArray.fromHexString(TRC10_TRANSFER_TOPIC_HEX)));
-      topics.add(new DataWord(leftPad32(entry.getFromEvm())));
-      topics.add(new DataWord(leftPad32(entry.getToEvm())));
-      topics.add(new DataWord(leftPad32(longToBytes(entry.getTokenId()))));
-      dataHex = ByteArray.toHexString(leftPad32(longToBytes(entry.getAmount())));
+      topics.add(new DataWord(entry.getFromEvm()));
+      topics.add(new DataWord(entry.getToEvm()));
+      topics.add(new DataWord(entry.getTokenId()));
+      dataHex = ByteArray.toHexString(new DataWord(entry.getAmount()).getData());
     } else {
       LogInfo li = entry.getLogInfo();
       byte[] addr = li.getAddress();
@@ -205,19 +213,19 @@ public final class SimulationResultEncoder {
       }
       addrEvm = ByteArray.fromHexString(ERC7528_NATIVE_ADDRESS);
       topics.add(ByteString.copyFrom(ByteArray.fromHexString(TRANSFER_TOPIC_HEX)));
-      topics.add(ByteString.copyFrom(leftPad32(entry.getFromEvm())));
-      topics.add(ByteString.copyFrom(leftPad32(entry.getToEvm())));
-      data = leftPad32(longToBytes(entry.getAmount()));
+      topics.add(ByteString.copyFrom(new DataWord(entry.getFromEvm()).getData()));
+      topics.add(ByteString.copyFrom(new DataWord(entry.getToEvm()).getData()));
+      data = new DataWord(entry.getAmount()).getData();
     } else if (entry.getKind() == BufferingSimulationTracer.EntryKind.TOKEN_TRANSFER) {
       if (!traceTransfers) {
         return null;
       }
       addrEvm = ByteArray.fromHexString(ERC7528_NATIVE_ADDRESS);
       topics.add(ByteString.copyFrom(ByteArray.fromHexString(TRC10_TRANSFER_TOPIC_HEX)));
-      topics.add(ByteString.copyFrom(leftPad32(entry.getFromEvm())));
-      topics.add(ByteString.copyFrom(leftPad32(entry.getToEvm())));
-      topics.add(ByteString.copyFrom(leftPad32(longToBytes(entry.getTokenId()))));
-      data = leftPad32(longToBytes(entry.getAmount()));
+      topics.add(ByteString.copyFrom(new DataWord(entry.getFromEvm()).getData()));
+      topics.add(ByteString.copyFrom(new DataWord(entry.getToEvm()).getData()));
+      topics.add(ByteString.copyFrom(new DataWord(entry.getTokenId()).getData()));
+      data = new DataWord(entry.getAmount()).getData();
     } else {
       LogInfo li = entry.getLogInfo();
       byte[] addr = li.getAddress();
@@ -265,26 +273,5 @@ public final class SimulationResultEncoder {
       logger.debug("parse revert reason failed", e);
       return "";
     }
-  }
-
-  private static byte[] leftPad32(byte[] src) {
-    if (src == null) {
-      return new byte[32];
-    }
-    if (src.length >= 32) {
-      return src;
-    }
-    byte[] out = new byte[32];
-    System.arraycopy(src, 0, out, 32 - src.length, src.length);
-    return out;
-  }
-
-  private static byte[] longToBytes(long v) {
-    byte[] out = new byte[8];
-    for (int i = 7; i >= 0; i--) {
-      out[i] = (byte) (v & 0xff);
-      v >>>= 8;
-    }
-    return out;
   }
 }

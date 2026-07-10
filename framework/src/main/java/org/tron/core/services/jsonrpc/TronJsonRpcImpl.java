@@ -40,7 +40,6 @@ import java.util.regex.Pattern;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
-import org.bouncycastle.util.encoders.Hex;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.tron.api.GrpcAPI.BytesMessage;
@@ -89,7 +88,9 @@ import org.tron.core.services.jsonrpc.types.BuildArguments;
 import org.tron.core.services.jsonrpc.types.CallArguments;
 import org.tron.core.services.jsonrpc.types.SimulateBlock;
 import org.tron.core.services.jsonrpc.types.SimulateBlockResult;
+import org.tron.core.services.jsonrpc.types.SimulateCallOutcome;
 import org.tron.core.services.jsonrpc.types.SimulateCallResult;
+import org.tron.core.services.jsonrpc.types.SimulateOutcome;
 import org.tron.core.services.jsonrpc.types.SimulateV1Args;
 import org.tron.core.services.jsonrpc.types.TransactionReceipt;
 import org.tron.core.services.jsonrpc.types.TransactionReceipt.TransactionContext;
@@ -1076,7 +1077,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
           + MAX_SIMULATE_CALLS_PER_BLOCK);
     }
 
-    Wallet.SimulateOutcome outcome;
+    SimulateOutcome outcome;
     try {
       List<TransactionCapsule> trxCaps = new ArrayList<>(block.getCalls().size());
       for (CallArguments call : block.getCalls()) {
@@ -1107,17 +1108,8 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
     long value = call.parseValue();
 
     if (call.getTo() == null || call.getTo().isEmpty()) {
-      SmartContract.Builder contract = SmartContract.newBuilder()
-          .setOriginAddress(ByteString.copyFrom(owner))
-          .setBytecode(ByteString.copyFrom(data))
-          .setCallValue(value)
-          .setConsumeUserResourcePercent(100)
-          .setOriginEnergyLimit(1);
-      CreateSmartContract.Builder deployBuilder = CreateSmartContract.newBuilder();
-      deployBuilder.setOwnerAddress(ByteString.copyFrom(owner));
-      deployBuilder.setNewContract(contract.build());
-      return wallet.createTransactionCapsule(deployBuilder.build(),
-          ContractType.CreateSmartContract);
+      CreateSmartContract create = Wallet.buildEvmCreateSmartContract(owner, data, value).build();
+      return wallet.createTransactionCapsule(create, ContractType.CreateSmartContract);
     }
 
     byte[] to = addressCompatibleToByteArray(call.getTo());
@@ -1125,7 +1117,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
     return wallet.createTransactionCapsule(trigger, ContractType.TriggerSmartContract);
   }
 
-  private SimulateBlockResult buildSimulateBlockResult(Wallet.SimulateOutcome outcome,
+  private SimulateBlockResult buildSimulateBlockResult(SimulateOutcome outcome,
       List<CallArguments> calls, boolean traceTransfers, boolean returnFullTransactions)
       throws JsonRpcInvalidParamsException {
     BlockCapsule head = outcome.getHeadBlockCapsule();
@@ -1139,28 +1131,19 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
     br.setNumber(ByteArray.toJsonHex(headNum + 1));
     br.setHash(simBlockHashHex);
     br.setParentHash(ByteArray.toJsonHex(headHash));
-    br.setNonce(ByteArray.toJsonHex(new byte[8]));
-    br.setSha3Uncles(ByteArray.toJsonHex(new byte[32]));
-    br.setLogsBloom(ByteArray.toJsonHex(new byte[256]));
     br.setTransactionsRoot(ByteArray.toJsonHex(new byte[32]));
     br.setStateRoot(ByteArray.toJsonHex(new byte[32]));
-    br.setReceiptsRoot(ByteArray.toJsonHex(new byte[32]));
     br.setMiner(ByteArray.toJsonHex(new byte[20]));
-    br.setDifficulty("0x0");
-    br.setTotalDifficulty("0x0");
-    br.setExtraData("0x");
     br.setSize("0x0");
     br.setGasLimit(ByteArray.toJsonHex(CommonParameter.getInstance().maxEnergyLimitForConstant));
     br.setTimestamp(ByteArray.toJsonHex((head.getTimeStamp() + BLOCK_INTERVAL_MS) / 1000));
-    br.setBaseFeePerGas("0x0");
-    br.setUncles(new String[0]);
 
     long totalGasUsed = 0L;
     AtomicInteger logIdx = new AtomicInteger(0);
     List<SimulateCallResult> callResults = new ArrayList<>(outcome.getCalls().size());
     Object[] transactions = new Object[outcome.getCalls().size()];
     for (int i = 0; i < outcome.getCalls().size(); i++) {
-      Wallet.SimulateCallOutcome callOutcome = outcome.getCalls().get(i);
+      SimulateCallOutcome callOutcome = outcome.getCalls().get(i);
       CallArguments call = calls.get(i);
 
       SimulateCallResult scr = SimulationResultEncoder.buildCallResult(

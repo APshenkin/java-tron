@@ -21,6 +21,8 @@ import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.TransactionCapsule;
 import org.tron.core.exception.ContractValidateException;
 import org.tron.core.services.jsonrpc.SimulationResultEncoder;
+import org.tron.core.services.jsonrpc.types.SimulateCallOutcome;
+import org.tron.core.services.jsonrpc.types.SimulateOutcome;
 import org.tron.core.vm.program.listener.BufferingSimulationTracer;
 import org.tron.json.JSONObject;
 import org.tron.protos.Protocol.Transaction.Contract.ContractType;
@@ -102,10 +104,10 @@ public class SimulateTriggerSmartContractServlet extends RateLimiterServlet {
       TransactionCapsule trxCap = wallet.createTransactionCapsule(build.build(),
           ContractType.TriggerSmartContract);
 
-      Wallet.SimulateOutcome outcome = wallet.simulateConstantContracts(
+      SimulateOutcome outcome = wallet.simulateConstantContracts(
           Collections.singletonList(trxCap), traceTransfers, validation);
       BlockCapsule head = outcome.getHeadBlockCapsule();
-      Wallet.SimulateCallOutcome callOutcome = outcome.getCalls().get(0);
+      SimulateCallOutcome callOutcome = outcome.getCalls().get(0);
       ProgramResult pr = callOutcome.getResult();
 
       ext.setTxid(ByteString.copyFrom(
